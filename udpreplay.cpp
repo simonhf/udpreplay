@@ -28,6 +28,8 @@ SOFTWARE.
 #include <netinet/udp.h>
 #include <pcap/pcap.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 int main(int argc, char *argv[]) {
   static const char usage[] =
@@ -36,15 +38,23 @@ int main(int argc, char *argv[]) {
       "  -i iface    interface to send packets through\n"
       "  -l          enable loopback\n"
       "  -s speed    replay speed relative to pcap timestamps\n"
+      "  -d delay    usec; e.g. 1,000 is 1 ms\n"
+      "  -f freq     delay every <freq> packets sent\n"
+      "  -g group    group <group> packets together, e.g. 1 or 6\n"
+      "  -r          repeat at end of pcap file\n"
       "  -t ttl      packet ttl";
 
   int ifindex = 0;
   int loopback = 0;
-  double speed = 1;
+  //double speed = 1;
   int ttl = -1;
+  int delay  = 100; // 0.1 ms
+  int freq   =  50; // delay every 50 packets
+  int repeat =   0;
+  int group  =   1;
 
   int opt;
-  while ((opt = getopt(argc, argv, "i:ls:t:")) != -1) {
+  while ((opt = getopt(argc, argv, "i:ls:t:rd:f:g:")) != -1) {
     switch (opt) {
     case 'i':
       ifindex = if_nametoindex(optarg);
@@ -56,8 +66,20 @@ int main(int argc, char *argv[]) {
     case 'l':
       loopback = 1;
       break;
-    case 's':
-      speed = std::stod(optarg);
+    case 'r':
+      repeat = 1;
+      break;
+    //case 's':
+    //  speed = std::stod(optarg);
+    //  break;
+    case 'd':
+      delay = std::stoi(optarg);
+      break;
+    case 'f':
+      freq = std::stoi(optarg);
+      break;
+    case 'g':
+      group = std::stoi(optarg);
       break;
     case 't':
       ttl = std::stoi(optarg);
@@ -104,6 +126,9 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  time_t last_time = time(NULL);
+  REPEAT:;
+
   char errbuf[PCAP_ERRBUF_SIZE];
   pcap_t *handle = pcap_open_offline(argv[optind], errbuf);
   if (handle == nullptr) {
@@ -114,7 +139,17 @@ int main(int argc, char *argv[]) {
   pcap_pkthdr header;
   const u_char *p;
   timeval tv = {0, 0};
+  unsigned long count = 0;
+  unsigned long sent  = 0;
+  unsigned long last_count = 0;
+  unsigned long last_sent  = 0;
+#define JUMBO_MAX_BYTES (9001)
+  char jumbo[JUMBO_MAX_BYTES];
+  int  jumbo_appends = 0;
+  int  jumbo_used    = 0;
+  printf("- starting sending loop\n");
   while ((p = pcap_next(handle, &header))) {
+    p += 2; // see https://www.eecis.udel.edu/~sunshine/expcs/code/pcap_packet_read.c
     if (header.len != header.caplen) {
       continue;
     }
@@ -137,23 +172,41 @@ int main(int argc, char *argv[]) {
     }
     timeval diff;
     timersub(&header.ts, &tv, &diff);
-    usleep((diff.tv_sec * 1000000 + diff.tv_usec) * speed);
+    //do not use original timings usleep((diff.tv_sec * 1000000 + diff.tv_usec) * speed);
 
     ssize_t len = ntohs(udp->len) - 8;
     const u_char *d = &p[sizeof(ether_header) + ip->ihl * 4 + sizeof(udphdr)];
+
+    if(jumbo_used + len > JUMBO_MAX_BYTES){ printf("ERROR: jumbo overflow detected!\n"); exit(0); }
+    memcpy(&jumbo[jumbo_used], d, len);
+    jumbo_appends ++;
+    jumbo_used    += len;
+    if(jumbo_appends == group) { // 6 for MTU 9,001 byte packet
 
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = udp->dest;
-    addr.sin_addr = {ip->daddr};
-    auto n = sendto(fd, d, len, 0, reinterpret_cast<sockaddr *>(&addr),
+    //addr.sin_addr = {ip->daddr};
+    addr.sin_addr.s_addr = inet_addr("10.130.18.8"); // force send packets to this IP!
+    auto n = sendto(fd, &jumbo[0], jumbo_used, 0, reinterpret_cast<sockaddr *>(&addr),
                     sizeof(addr));
-    if (n != len) {
+    if (n != jumbo_used) {
       std::cerr << "sendto: " << strerror(errno) << std::endl;
       return 1;
     }
+    sent += jumbo_used;
+    if ((++ count % 100) == 0) { time_t this_time = time(NULL); if(this_time != last_time) { last_time = this_time; printf("- sent %lu bytes in %lu packets\n", sent - last_sent, count - last_count); last_sent = sent; last_count = count; }}
+    if ((count % freq) == 0) { usleep(delay); } // delay=100 means sleep for 0.1 ms
+    //if (count == 152) { exit(0); }
+
+    jumbo_appends = 0;
+    jumbo_used    = 0;
+    }
   }
+  printf("- sent %lu bytes in %lu packets total\n", sent, count);
+
+  if (repeat) { pcap_close(handle); goto REPEAT; }
 
   return 0;
 }
