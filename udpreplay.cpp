@@ -42,6 +42,7 @@ int main(int argc, char *argv[]) {
       "  -f freq     delay every <freq> packets sent\n"
       "  -g group    group <group> packets together, e.g. 1 or 6\n"
       "  -r          repeat at end of pcap file\n"
+      "  -h host     host ip, e.g. 127.0.0.1\n"
       "  -t ttl      packet ttl";
 
   int ifindex = 0;
@@ -52,9 +53,10 @@ int main(int argc, char *argv[]) {
   int freq   =  50; // delay every 50 packets
   int repeat =   0;
   int group  =   1;
+  char *host = "127.0.0.1";
 
   int opt;
-  while ((opt = getopt(argc, argv, "i:ls:t:rd:f:g:")) != -1) {
+  while ((opt = getopt(argc, argv, "i:ls:t:rd:f:g:h:")) != -1) {
     switch (opt) {
     case 'i':
       ifindex = if_nametoindex(optarg);
@@ -83,6 +85,9 @@ int main(int argc, char *argv[]) {
       break;
     case 't':
       ttl = std::stoi(optarg);
+      break;
+    case 'h':
+      host = optarg;
       break;
     default:
       std::cerr << "usage: " << argv[0] << usage << std::endl;
@@ -188,7 +193,7 @@ int main(int argc, char *argv[]) {
     addr.sin_family = AF_INET;
     addr.sin_port = udp->dest;
     //addr.sin_addr = {ip->daddr};
-    addr.sin_addr.s_addr = inet_addr("10.130.18.8"); // force send packets to this IP!
+    addr.sin_addr.s_addr = inet_addr(host); // force send packets to this IP!
     auto n = sendto(fd, &jumbo[0], jumbo_used, 0, reinterpret_cast<sockaddr *>(&addr),
                     sizeof(addr));
     if (n != jumbo_used) {
